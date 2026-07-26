@@ -82,7 +82,10 @@ def execute(
         json=payload,
         timeout=timeout,
     )
-    response.raise_for_status()
+    if not response.ok:
+        raise TursoHTTPError(
+            f"Turso HTTP {response.status_code} for {sql[:60]!r}: {response.text}"
+        )
     data = response.json()
 
     first_result = data["results"][0]

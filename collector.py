@@ -336,7 +336,10 @@ async def main() -> None:
             except Exception as exc:
                 print(f"EG4 collection error: {type(exc).__name__}: {exc}")
 
-            collect_tesla(recorded_at)
+            try:
+                collect_tesla(recorded_at)
+            except Exception as exc:
+                print(f"Tesla collection error: {type(exc).__name__}: {exc}")
             await asyncio.sleep(POLL_SECONDS)
 
 
