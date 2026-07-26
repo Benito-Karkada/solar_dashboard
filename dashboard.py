@@ -3,10 +3,11 @@ import math
 import os
 import textwrap
 
-import libsql
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+
+import turso_http
 
 
 def _secret_or_env(name: str) -> str:
@@ -95,39 +96,35 @@ st.markdown(
 )
 
 
-def _rows_to_frame(cursor, parse_dates: list[str] | None = None) -> pd.DataFrame:
-    columns = [description[0] for description in cursor.description]
-    frame = pd.DataFrame(cursor.fetchall(), columns=columns)
-    for column in parse_dates or []:
-        if column in frame.columns:
-            frame[column] = pd.to_datetime(frame[column])
-    return frame
-
-
 @st.cache_data(ttl=8)
 def load_data() -> tuple[pd.DataFrame, pd.DataFrame]:
     if not TURSO_DATABASE_URL or not TURSO_AUTH_TOKEN:
         return pd.DataFrame(), pd.DataFrame()
 
-    connection = libsql.connect(
-        database=TURSO_DATABASE_URL,
-        auth_token=TURSO_AUTH_TOKEN,
-    )
     try:
-        cursor = connection.execute(
-            "SELECT * FROM inverter_readings ORDER BY recorded_at"
+        inverter_rows = turso_http.execute(
+            TURSO_DATABASE_URL,
+            TURSO_AUTH_TOKEN,
+            "SELECT * FROM inverter_readings ORDER BY recorded_at",
         )
-        inverter_data = _rows_to_frame(cursor, parse_dates=["recorded_at"])
+    except Exception:
+        return pd.DataFrame(), pd.DataFrame()
 
-        try:
-            cursor = connection.execute(
-                "SELECT * FROM tesla_readings ORDER BY recorded_at"
-            )
-            tesla_data = _rows_to_frame(cursor, parse_dates=["recorded_at"])
-        except Exception:
-            tesla_data = pd.DataFrame()
-    finally:
-        connection.close()
+    inverter_data = pd.DataFrame(inverter_rows)
+    if "recorded_at" in inverter_data.columns:
+        inverter_data["recorded_at"] = pd.to_datetime(inverter_data["recorded_at"])
+
+    try:
+        tesla_rows = turso_http.execute(
+            TURSO_DATABASE_URL,
+            TURSO_AUTH_TOKEN,
+            "SELECT * FROM tesla_readings ORDER BY recorded_at",
+        )
+        tesla_data = pd.DataFrame(tesla_rows)
+        if "recorded_at" in tesla_data.columns:
+            tesla_data["recorded_at"] = pd.to_datetime(tesla_data["recorded_at"])
+    except Exception:
+        tesla_data = pd.DataFrame()
 
     return inverter_data, tesla_data
 

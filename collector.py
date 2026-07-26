@@ -6,7 +6,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any
 
-import libsql
+import turso_http
 from dotenv import load_dotenv
 from pylxpweb import LuxpowerClient
 from pylxpweb.devices.station import Station
@@ -21,8 +21,8 @@ TURSO_DATABASE_URL = os.getenv("TURSO_DATABASE_URL")
 TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN")
 
 
-def get_connection():
-    return libsql.connect(database=TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN)
+def turso(sql: str, params: tuple = ()) -> list[dict]:
+    return turso_http.execute(TURSO_DATABASE_URL, TURSO_AUTH_TOKEN, sql, params)
 
 
 def number(value: Any, default: float = 0.0) -> float:
@@ -32,108 +32,100 @@ def number(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def ensure_column(connection, table: str, name: str, sql_type: str) -> None:
-    existing = {
-        row[1]
-        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
-    }
+def ensure_column(table: str, name: str, sql_type: str) -> None:
+    existing = {row["name"] for row in turso(f"PRAGMA table_info({table})")}
     if name not in existing:
-        connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+        turso(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
 
 
 def initialise_database() -> None:
-    connection = get_connection()
-    try:
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS inverter_readings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                recorded_at TEXT NOT NULL,
-                station_name TEXT NOT NULL,
-                inverter_serial TEXT NOT NULL,
-                inverter_model TEXT
-            )
-            """
+    turso(
+        """
+        CREATE TABLE IF NOT EXISTS inverter_readings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recorded_at TEXT NOT NULL,
+            station_name TEXT NOT NULL,
+            inverter_serial TEXT NOT NULL,
+            inverter_model TEXT
         )
+        """
+    )
 
-        inverter_columns = {
-            "pv1_power_w": "REAL",
-            "pv2_power_w": "REAL",
-            "pv_total_power_w": "REAL",
-            "pv1_voltage_v": "REAL",
-            "pv2_voltage_v": "REAL",
-            "pv1_current_a": "REAL",
-            "pv2_current_a": "REAL",
-            "battery_soc_percent": "REAL",
-            "battery_voltage_v": "REAL",
-            "battery_charge_power_w": "REAL",
-            "battery_discharge_power_w": "REAL",
-            "output_power_w": "REAL",
-            "output_power_l1_w": "REAL",
-            "output_power_l2_w": "REAL",
-            "output_voltage_v": "REAL",
-            "output_frequency_hz": "REAL",
-            "utility_power_w": "REAL",
-            "utility_voltage_v": "REAL",
-            "utility_frequency_hz": "REAL",
-            "inverter_temp_c": "REAL",
-            "radiator1_temp_c": "REAL",
-            "radiator2_temp_c": "REAL",
-            "battery_temp_c": "REAL",
-            "yield_today_kwh": "REAL",
-            "charge_today_kwh": "REAL",
-            "discharge_today_kwh": "REAL",
-            "usage_today_kwh": "REAL",
-            "yield_lifetime_kwh": "REAL",
-            "charge_lifetime_kwh": "REAL",
-            "discharge_lifetime_kwh": "REAL",
-            "usage_lifetime_kwh": "REAL",
-        }
+    inverter_columns = {
+        "pv1_power_w": "REAL",
+        "pv2_power_w": "REAL",
+        "pv_total_power_w": "REAL",
+        "pv1_voltage_v": "REAL",
+        "pv2_voltage_v": "REAL",
+        "pv1_current_a": "REAL",
+        "pv2_current_a": "REAL",
+        "battery_soc_percent": "REAL",
+        "battery_voltage_v": "REAL",
+        "battery_charge_power_w": "REAL",
+        "battery_discharge_power_w": "REAL",
+        "output_power_w": "REAL",
+        "output_power_l1_w": "REAL",
+        "output_power_l2_w": "REAL",
+        "output_voltage_v": "REAL",
+        "output_frequency_hz": "REAL",
+        "utility_power_w": "REAL",
+        "utility_voltage_v": "REAL",
+        "utility_frequency_hz": "REAL",
+        "inverter_temp_c": "REAL",
+        "radiator1_temp_c": "REAL",
+        "radiator2_temp_c": "REAL",
+        "battery_temp_c": "REAL",
+        "yield_today_kwh": "REAL",
+        "charge_today_kwh": "REAL",
+        "discharge_today_kwh": "REAL",
+        "usage_today_kwh": "REAL",
+        "yield_lifetime_kwh": "REAL",
+        "charge_lifetime_kwh": "REAL",
+        "discharge_lifetime_kwh": "REAL",
+        "usage_lifetime_kwh": "REAL",
+    }
 
-        for name, sql_type in inverter_columns.items():
-            ensure_column(connection, "inverter_readings", name, sql_type)
+    for name, sql_type in inverter_columns.items():
+        ensure_column("inverter_readings", name, sql_type)
 
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS tesla_readings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                recorded_at TEXT NOT NULL,
-                contactor_closed INTEGER NOT NULL,
-                vehicle_connected INTEGER NOT NULL,
-                charging_current_a REAL,
-                grid_voltage_v REAL,
-                grid_frequency_hz REAL,
-                charging_power_w REAL,
-                session_seconds REAL,
-                session_energy_wh REAL,
-                pcba_temp_c REAL,
-                handle_temp_c REAL,
-                mcu_temp_c REAL,
-                evse_state INTEGER,
-                alerts_json TEXT,
-                lifetime_energy_wh REAL,
-                charging_time_s REAL,
-                charge_starts REAL
-            )
-            """
+    turso(
+        """
+        CREATE TABLE IF NOT EXISTS tesla_readings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recorded_at TEXT NOT NULL,
+            contactor_closed INTEGER NOT NULL,
+            vehicle_connected INTEGER NOT NULL,
+            charging_current_a REAL,
+            grid_voltage_v REAL,
+            grid_frequency_hz REAL,
+            charging_power_w REAL,
+            session_seconds REAL,
+            session_energy_wh REAL,
+            pcba_temp_c REAL,
+            handle_temp_c REAL,
+            mcu_temp_c REAL,
+            evse_state INTEGER,
+            alerts_json TEXT,
+            lifetime_energy_wh REAL,
+            charging_time_s REAL,
+            charge_starts REAL
         )
+        """
+    )
 
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_inverter_time_serial
-            ON inverter_readings(recorded_at, inverter_serial)
-            """
-        )
+    turso(
+        """
+        CREATE INDEX IF NOT EXISTS idx_inverter_time_serial
+        ON inverter_readings(recorded_at, inverter_serial)
+        """
+    )
 
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_tesla_time
-            ON tesla_readings(recorded_at)
-            """
-        )
-        connection.commit()
-    finally:
-        connection.close()
+    turso(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tesla_time
+        ON tesla_readings(recorded_at)
+        """
+    )
 
 
 def save_inverter_reading(
@@ -141,90 +133,85 @@ def save_inverter_reading(
     inverter: Any,
     recorded_at: str,
 ) -> None:
-    connection = get_connection()
-    try:
-        connection.execute(
-            """
-            INSERT INTO inverter_readings (
-                recorded_at,
-                station_name,
-                inverter_serial,
-                inverter_model,
-                pv1_power_w,
-                pv2_power_w,
-                pv_total_power_w,
-                pv1_voltage_v,
-                pv2_voltage_v,
-                pv1_current_a,
-                pv2_current_a,
-                battery_soc_percent,
-                battery_voltage_v,
-                battery_charge_power_w,
-                battery_discharge_power_w,
-                output_power_w,
-                output_power_l1_w,
-                output_power_l2_w,
-                output_voltage_v,
-                output_frequency_hz,
-                utility_power_w,
-                utility_voltage_v,
-                utility_frequency_hz,
-                inverter_temp_c,
-                radiator1_temp_c,
-                radiator2_temp_c,
-                battery_temp_c,
-                yield_today_kwh,
-                charge_today_kwh,
-                discharge_today_kwh,
-                usage_today_kwh,
-                yield_lifetime_kwh,
-                charge_lifetime_kwh,
-                discharge_lifetime_kwh,
-                usage_lifetime_kwh
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                recorded_at,
-                station_name,
-                str(getattr(inverter, "serial_number", "unknown")),
-                str(getattr(inverter, "model", "unknown")),
-                number(getattr(inverter, "pv1_power", 0)),
-                number(getattr(inverter, "pv2_power", 0)),
-                number(getattr(inverter, "pv_total_power", 0)),
-                number(getattr(inverter, "pv1_voltage", 0)),
-                number(getattr(inverter, "pv2_voltage", 0)),
-                number(getattr(inverter, "pv1_current", 0)),
-                number(getattr(inverter, "pv2_current", 0)),
-                number(getattr(inverter, "battery_soc", 0)),
-                number(getattr(inverter, "battery_voltage", 0)),
-                number(getattr(inverter, "battery_charge_power", 0)),
-                number(getattr(inverter, "battery_discharge_power", 0)),
-                number(getattr(inverter, "eps_power", 0)),
-                number(getattr(inverter, "eps_power_l1", 0)),
-                number(getattr(inverter, "eps_power_l2", 0)),
-                number(getattr(inverter, "eps_voltage_r", 0)),
-                number(getattr(inverter, "eps_frequency", 0)),
-                number(getattr(inverter, "generator_power", 0)),
-                number(getattr(inverter, "generator_voltage", 0)),
-                number(getattr(inverter, "generator_frequency", 0)),
-                number(getattr(inverter, "inverter_temperature", 0)),
-                number(getattr(inverter, "radiator1_temperature", 0)),
-                number(getattr(inverter, "radiator2_temperature", 0)),
-                number(getattr(inverter, "battery_temperature", 0)),
-                number(getattr(inverter, "total_energy_today", 0)),
-                number(getattr(inverter, "energy_today_charging", 0)),
-                number(getattr(inverter, "energy_today_discharging", 0)),
-                number(getattr(inverter, "energy_today_usage", 0)),
-                number(getattr(inverter, "total_energy_lifetime", 0)),
-                number(getattr(inverter, "energy_lifetime_charging", 0)),
-                number(getattr(inverter, "energy_lifetime_discharging", 0)),
-                number(getattr(inverter, "energy_lifetime_usage", 0)),
-            ),
+    turso(
+        """
+        INSERT INTO inverter_readings (
+            recorded_at,
+            station_name,
+            inverter_serial,
+            inverter_model,
+            pv1_power_w,
+            pv2_power_w,
+            pv_total_power_w,
+            pv1_voltage_v,
+            pv2_voltage_v,
+            pv1_current_a,
+            pv2_current_a,
+            battery_soc_percent,
+            battery_voltage_v,
+            battery_charge_power_w,
+            battery_discharge_power_w,
+            output_power_w,
+            output_power_l1_w,
+            output_power_l2_w,
+            output_voltage_v,
+            output_frequency_hz,
+            utility_power_w,
+            utility_voltage_v,
+            utility_frequency_hz,
+            inverter_temp_c,
+            radiator1_temp_c,
+            radiator2_temp_c,
+            battery_temp_c,
+            yield_today_kwh,
+            charge_today_kwh,
+            discharge_today_kwh,
+            usage_today_kwh,
+            yield_lifetime_kwh,
+            charge_lifetime_kwh,
+            discharge_lifetime_kwh,
+            usage_lifetime_kwh
         )
-        connection.commit()
-    finally:
-        connection.close()
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            recorded_at,
+            station_name,
+            str(getattr(inverter, "serial_number", "unknown")),
+            str(getattr(inverter, "model", "unknown")),
+            number(getattr(inverter, "pv1_power", 0)),
+            number(getattr(inverter, "pv2_power", 0)),
+            number(getattr(inverter, "pv_total_power", 0)),
+            number(getattr(inverter, "pv1_voltage", 0)),
+            number(getattr(inverter, "pv2_voltage", 0)),
+            number(getattr(inverter, "pv1_current", 0)),
+            number(getattr(inverter, "pv2_current", 0)),
+            number(getattr(inverter, "battery_soc", 0)),
+            number(getattr(inverter, "battery_voltage", 0)),
+            number(getattr(inverter, "battery_charge_power", 0)),
+            number(getattr(inverter, "battery_discharge_power", 0)),
+            number(getattr(inverter, "eps_power", 0)),
+            number(getattr(inverter, "eps_power_l1", 0)),
+            number(getattr(inverter, "eps_power_l2", 0)),
+            number(getattr(inverter, "eps_voltage_r", 0)),
+            number(getattr(inverter, "eps_frequency", 0)),
+            number(getattr(inverter, "generator_power", 0)),
+            number(getattr(inverter, "generator_voltage", 0)),
+            number(getattr(inverter, "generator_frequency", 0)),
+            number(getattr(inverter, "inverter_temperature", 0)),
+            number(getattr(inverter, "radiator1_temperature", 0)),
+            number(getattr(inverter, "radiator2_temperature", 0)),
+            number(getattr(inverter, "battery_temperature", 0)),
+            number(getattr(inverter, "total_energy_today", 0)),
+            number(getattr(inverter, "energy_today_charging", 0)),
+            number(getattr(inverter, "energy_today_discharging", 0)),
+            number(getattr(inverter, "energy_today_usage", 0)),
+            number(getattr(inverter, "total_energy_lifetime", 0)),
+            number(getattr(inverter, "energy_lifetime_charging", 0)),
+            number(getattr(inverter, "energy_lifetime_discharging", 0)),
+            number(getattr(inverter, "energy_lifetime_usage", 0)),
+        ),
+    )
 
 
 def fetch_json(url: str, timeout: float = 4.0) -> dict[str, Any]:
@@ -248,54 +235,49 @@ def collect_tesla(recorded_at: str) -> None:
     grid_v = number(vitals.get("grid_v"))
     charging_power_w = current_a * grid_v
 
-    connection = get_connection()
-    try:
-        connection.execute(
-            """
-            INSERT INTO tesla_readings (
-                recorded_at,
-                contactor_closed,
-                vehicle_connected,
-                charging_current_a,
-                grid_voltage_v,
-                grid_frequency_hz,
-                charging_power_w,
-                session_seconds,
-                session_energy_wh,
-                pcba_temp_c,
-                handle_temp_c,
-                mcu_temp_c,
-                evse_state,
-                alerts_json,
-                lifetime_energy_wh,
-                charging_time_s,
-                charge_starts
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                recorded_at,
-                int(bool(vitals.get("contactor_closed"))),
-                int(bool(vitals.get("vehicle_connected"))),
-                current_a,
-                grid_v,
-                number(vitals.get("grid_hz")),
-                charging_power_w,
-                number(vitals.get("session_s")),
-                number(vitals.get("session_energy_wh")),
-                number(vitals.get("pcba_temp_c")),
-                number(vitals.get("handle_temp_c")),
-                number(vitals.get("mcu_temp_c")),
-                int(number(vitals.get("evse_state"))),
-                json.dumps(vitals.get("current_alerts", [])),
-                number(lifetime.get("energy_wh")),
-                number(lifetime.get("charging_time_s")),
-                number(lifetime.get("charge_starts")),
-            ),
+    turso(
+        """
+        INSERT INTO tesla_readings (
+            recorded_at,
+            contactor_closed,
+            vehicle_connected,
+            charging_current_a,
+            grid_voltage_v,
+            grid_frequency_hz,
+            charging_power_w,
+            session_seconds,
+            session_energy_wh,
+            pcba_temp_c,
+            handle_temp_c,
+            mcu_temp_c,
+            evse_state,
+            alerts_json,
+            lifetime_energy_wh,
+            charging_time_s,
+            charge_starts
         )
-        connection.commit()
-    finally:
-        connection.close()
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            recorded_at,
+            int(bool(vitals.get("contactor_closed"))),
+            int(bool(vitals.get("vehicle_connected"))),
+            current_a,
+            grid_v,
+            number(vitals.get("grid_hz")),
+            charging_power_w,
+            number(vitals.get("session_s")),
+            number(vitals.get("session_energy_wh")),
+            number(vitals.get("pcba_temp_c")),
+            number(vitals.get("handle_temp_c")),
+            number(vitals.get("mcu_temp_c")),
+            int(number(vitals.get("evse_state"))),
+            json.dumps(vitals.get("current_alerts", [])),
+            number(lifetime.get("energy_wh")),
+            number(lifetime.get("charging_time_s")),
+            number(lifetime.get("charge_starts")),
+        ),
+    )
 
     status = "charging" if vitals.get("contactor_closed") and current_a > 0.2 else (
         "connected" if vitals.get("vehicle_connected") else "idle"
