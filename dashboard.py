@@ -1,15 +1,25 @@
 import json
 import math
-import sqlite3
+import os
 import textwrap
-from pathlib import Path
 
+import libsql
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
 
-DB_PATH = Path("energy.db")
+def _secret_or_env(name: str) -> str:
+    try:
+        if name in st.secrets:
+            return st.secrets[name]
+    except Exception:
+        pass
+    return os.getenv(name, "")
+
+
+TURSO_DATABASE_URL = _secret_or_env("TURSO_DATABASE_URL")
+TURSO_AUTH_TOKEN = _secret_or_env("TURSO_AUTH_TOKEN")
 
 SYSTEM_CAPACITY_W = 12_000
 RESERVE_MARGIN_W = 1_500
@@ -85,26 +95,39 @@ st.markdown(
 )
 
 
+def _rows_to_frame(cursor, parse_dates: list[str] | None = None) -> pd.DataFrame:
+    columns = [description[0] for description in cursor.description]
+    frame = pd.DataFrame(cursor.fetchall(), columns=columns)
+    for column in parse_dates or []:
+        if column in frame.columns:
+            frame[column] = pd.to_datetime(frame[column])
+    return frame
+
+
 @st.cache_data(ttl=8)
 def load_data() -> tuple[pd.DataFrame, pd.DataFrame]:
-    if not DB_PATH.exists():
+    if not TURSO_DATABASE_URL or not TURSO_AUTH_TOKEN:
         return pd.DataFrame(), pd.DataFrame()
 
-    with sqlite3.connect(DB_PATH) as connection:
-        inverter_data = pd.read_sql_query(
-            "SELECT * FROM inverter_readings ORDER BY recorded_at",
-            connection,
-            parse_dates=["recorded_at"],
+    connection = libsql.connect(
+        database=TURSO_DATABASE_URL,
+        auth_token=TURSO_AUTH_TOKEN,
+    )
+    try:
+        cursor = connection.execute(
+            "SELECT * FROM inverter_readings ORDER BY recorded_at"
         )
+        inverter_data = _rows_to_frame(cursor, parse_dates=["recorded_at"])
 
         try:
-            tesla_data = pd.read_sql_query(
-                "SELECT * FROM tesla_readings ORDER BY recorded_at",
-                connection,
-                parse_dates=["recorded_at"],
+            cursor = connection.execute(
+                "SELECT * FROM tesla_readings ORDER BY recorded_at"
             )
-        except (sqlite3.OperationalError, pd.errors.DatabaseError):
+            tesla_data = _rows_to_frame(cursor, parse_dates=["recorded_at"])
+        except Exception:
             tesla_data = pd.DataFrame()
+    finally:
+        connection.close()
 
     return inverter_data, tesla_data
 

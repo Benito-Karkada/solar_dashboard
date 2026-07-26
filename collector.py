@@ -1,21 +1,28 @@
 import asyncio
 import json
 import os
-import sqlite3
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
+import libsql
 from dotenv import load_dotenv
 from pylxpweb import LuxpowerClient
 from pylxpweb.devices.station import Station
 
 
-DB_PATH = Path("energy.db")
+load_dotenv()
+
 POLL_SECONDS = 30
 TESLA_HOST = os.getenv("TESLA_WALL_CONNECTOR_HOST", "192.168.1.121")
+
+TURSO_DATABASE_URL = os.getenv("TURSO_DATABASE_URL")
+TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN")
+
+
+def get_connection():
+    return libsql.connect(database=TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN)
 
 
 def number(value: Any, default: float = 0.0) -> float:
@@ -25,17 +32,18 @@ def number(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def ensure_column(connection: sqlite3.Connection, table: str, name: str, sql_type: str) -> None:
+def ensure_column(connection, table: str, name: str, sql_type: str) -> None:
     existing = {
         row[1]
-        for row in connection.execute(f"PRAGMA table_info({table})")
+        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
     }
     if name not in existing:
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
 
 
 def initialise_database() -> None:
-    with sqlite3.connect(DB_PATH) as connection:
+    connection = get_connection()
+    try:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS inverter_readings (
@@ -123,6 +131,9 @@ def initialise_database() -> None:
             ON tesla_readings(recorded_at)
             """
         )
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def save_inverter_reading(
@@ -130,7 +141,8 @@ def save_inverter_reading(
     inverter: Any,
     recorded_at: str,
 ) -> None:
-    with sqlite3.connect(DB_PATH) as connection:
+    connection = get_connection()
+    try:
         connection.execute(
             """
             INSERT INTO inverter_readings (
@@ -210,6 +222,9 @@ def save_inverter_reading(
                 number(getattr(inverter, "energy_lifetime_usage", 0)),
             ),
         )
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def fetch_json(url: str, timeout: float = 4.0) -> dict[str, Any]:
@@ -233,7 +248,8 @@ def collect_tesla(recorded_at: str) -> None:
     grid_v = number(vitals.get("grid_v"))
     charging_power_w = current_a * grid_v
 
-    with sqlite3.connect(DB_PATH) as connection:
+    connection = get_connection()
+    try:
         connection.execute(
             """
             INSERT INTO tesla_readings (
@@ -277,6 +293,9 @@ def collect_tesla(recorded_at: str) -> None:
                 number(lifetime.get("charge_starts")),
             ),
         )
+        connection.commit()
+    finally:
+        connection.close()
 
     status = "charging" if vitals.get("contactor_closed") and current_a > 0.2 else (
         "connected" if vitals.get("vehicle_connected") else "idle"
@@ -307,7 +326,9 @@ async def collect_eg4(client: LuxpowerClient, recorded_at: str) -> None:
 
 
 async def main() -> None:
-    load_dotenv()
+    if not TURSO_DATABASE_URL or not TURSO_AUTH_TOKEN:
+        raise RuntimeError("Missing TURSO_DATABASE_URL or TURSO_AUTH_TOKEN in .env")
+
     initialise_database()
 
     username = os.getenv("EG4_USERNAME")
