@@ -2,4 +2,4 @@ pylxpweb
 python-dotenv
 streamlit
 pandas
-libsql
+requests
