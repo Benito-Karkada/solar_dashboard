@@ -61,6 +61,20 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
+# Reruns the whole page every 10s so it updates on its own without a manual
+# browser refresh. load_data() is still cached for 8s (see below), so this
+# doesn't hammer Turso on every reload.
+components.html(
+    """
+    <script>
+    setTimeout(function () {
+        window.parent.location.reload();
+    }, 10000);
+    </script>
+    """,
+    height=0,
+)
+
 
 # Only page-chrome CSS lives in st.markdown, and it never contains a <div>,
 # so there's no risk of Streamlit's Markdown parser treating any of it as
