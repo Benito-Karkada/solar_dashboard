@@ -1,0 +1,16 @@
+[Unit]
+Description=EG4/Tesla energy collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=benny
+WorkingDirectory=/home/benny/eg4-energy
+EnvironmentFile=/home/benny/eg4-energy/.env
+ExecStart=/home/benny/eg4-energy/.venv/bin/python /home/benny/eg4-energy/collector.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
