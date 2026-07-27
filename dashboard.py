@@ -923,7 +923,7 @@ def render_live_dashboard() -> None:
 
     nodes = [
         {
-            "id": "solar", "x": 18, "y": 18, "colour": COLOUR_SOLAR, "active": solar_active,
+            "id": "solar", "x": 18, "y": 25, "colour": COLOUR_SOLAR, "active": solar_active,
             "icon": icon_solar(solar_active), "label": "Solar panels",
             "value": watts(total_solar),
             "sub": "Producing now" if solar_active else "No sun right now",
@@ -935,7 +935,7 @@ def render_live_dashboard() -> None:
             "sub": f"{len(latest_inverters)} unit{'s' if len(latest_inverters) > 1 else ''} online",
         },
         {
-            "id": "battery", "x": 82, "y": 18, "colour": battery_colour, "active": True,
+            "id": "battery", "x": 82, "y": 25, "colour": battery_colour, "active": True,
             "icon": icon_battery(battery_soc), "label": "Battery bank",
             "value": f"{battery_soc:.0f}%",
             "sub": battery_label,
@@ -957,12 +957,12 @@ def render_live_dashboard() -> None:
 
     edges = [
         {
-            "id": "edge-solar", "d": "M18,18 L50,50",
+            "id": "edge-solar", "d": "M18,25 L50,50",
             "colour": COLOUR_SOLAR, "active": solar_active, "duration": 2.2,
         },
         {
             "id": "edge-battery",
-            "d": "M82,18 L50,50" if battery_net > 10 else "M50,50 L82,18",
+            "d": "M82,25 L50,50" if battery_net > 10 else "M50,50 L82,25",
             "colour": battery_colour, "active": battery_active, "duration": 2.0,
         },
         {
