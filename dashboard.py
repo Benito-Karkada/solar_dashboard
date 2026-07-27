@@ -61,20 +61,6 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# Reruns the whole page every 10s so it updates on its own without a manual
-# browser refresh. load_data() is still cached for 8s (see below), so this
-# doesn't hammer Turso on every reload.
-components.html(
-    """
-    <script>
-    setTimeout(function () {
-        window.parent.location.reload();
-    }, 10000);
-    </script>
-    """,
-    height=0,
-)
-
 
 # Only page-chrome CSS lives in st.markdown, and it never contains a <div>,
 # so there's no risk of Streamlit's Markdown parser treating any of it as
@@ -402,6 +388,7 @@ def build_dashboard_html(context: dict) -> str:
     <html>
     <head>
     <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
     * {{ box-sizing: border-box; }}
 
@@ -622,6 +609,24 @@ def build_dashboard_html(context: dict) -> str:
         .main-row {{ grid-template-columns: 1fr; }}
         .lower-row {{ grid-template-columns: 1fr; }}
     }}
+
+    @media (max-width: 640px) {{
+        .metric-grid {{ grid-template-columns: 1fr; }}
+        .stat-grid {{ grid-template-columns: 1fr; }}
+        .temp-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+        .flow-canvas {{ height: 460px; }}
+        .flow-node {{ width: 128px; padding: 9px 8px 10px; }}
+        .node-icon {{ width: 30px; height: 30px; }}
+        .node-value {{ font-size: 16px; }}
+        .brand-title {{ font-size: 23px; }}
+        .rec-value {{ font-size: 32px; }}
+        .string-row {{
+            grid-template-columns: 1fr;
+            gap: 4px;
+            margin-bottom: 14px;
+        }}
+        .string-stats {{ justify-content: flex-start; }}
+    }}
     </style>
     </head>
     <body>
@@ -754,322 +759,329 @@ def build_dashboard_html(context: dict) -> str:
     return html
 
 
-inverter_df, tesla_df = load_data()
+@st.fragment(run_every="10s")
+def render_live_dashboard() -> None:
+    """Data load + full render, reruns on its own every 10s via the
+    decorator above, no page reload and no lost scroll position.
+    """
+    inverter_df, tesla_df = load_data()
 
-if inverter_df.empty:
-    st.error("No inverter readings yet. Start collector.py and wait for one collection cycle.")
-    st.stop()
-
-
-latest_inverter_time = inverter_df["recorded_at"].max()
-
-latest_inverters = (
-    inverter_df[inverter_df["recorded_at"] == latest_inverter_time]
-    .sort_values("inverter_serial")
-    .reset_index(drop=True)
-)
-
-latest_tesla = tesla_df.iloc[-1] if not tesla_df.empty else None
+    if inverter_df.empty:
+        st.error("No inverter readings yet. Start collector.py and wait for one collection cycle.")
+        st.stop()
 
 
-total_solar = number(latest_inverters["pv_total_power_w"].sum())
-total_output = number(latest_inverters["output_power_w"].sum())
-battery_charge = number(latest_inverters["battery_charge_power_w"].sum())
-battery_discharge = number(latest_inverters["battery_discharge_power_w"].sum())
-battery_soc = number(latest_inverters["battery_soc_percent"].mean())
-battery_voltage = number(latest_inverters["battery_voltage_v"].mean())
+    latest_inverter_time = inverter_df["recorded_at"].max()
 
-
-if latest_tesla is not None:
-    tesla_current = number(latest_tesla["charging_current_a"])
-    tesla_voltage = number(latest_tesla["grid_voltage_v"])
-    tesla_power = number(latest_tesla["charging_power_w"])
-    vehicle_connected = bool(latest_tesla["vehicle_connected"])
-    contactor_closed = bool(latest_tesla["contactor_closed"])
-    session_energy_wh = number(latest_tesla["session_energy_wh"])
-    lifetime_energy_wh = number(latest_tesla["lifetime_energy_wh"])
-    handle_temp = number(latest_tesla["handle_temp_c"])
-    try:
-        alerts = json.loads(latest_tesla["alerts_json"] or "[]")
-    except (json.JSONDecodeError, TypeError):
-        alerts = []
-else:
-    tesla_current = tesla_voltage = tesla_power = 0.0
-    vehicle_connected = contactor_closed = False
-    session_energy_wh = lifetime_energy_wh = handle_temp = 0.0
-    alerts = []
-
-
-tesla_is_charging = contactor_closed and tesla_current > 0.2
-
-if tesla_is_charging:
-    tesla_status = "Charging"
-elif vehicle_connected:
-    tesla_status = "Connected"
-else:
-    tesla_status = "Idle"
-
-
-other_load = max(total_output - tesla_power, 0.0)
-
-battery_net = battery_discharge - battery_charge
-if battery_net > 10:
-    battery_label = "Discharging"
-elif battery_net < -10:
-    battery_label = "Charging"
-else:
-    battery_label = "Idle"
-battery_flow = abs(battery_net)
-battery_colour = battery_tier_colour(battery_soc)
-
-
-available_for_tesla = max(SYSTEM_CAPACITY_W - other_load - RESERVE_MARGIN_W, 0.0)
-recommended_a = min(
-    TESLA_CONFIGURED_MAX_A,
-    math.floor(available_for_tesla / max(tesla_voltage or 240, 1)),
-)
-
-headroom = max(SYSTEM_CAPACITY_W - total_output, 0.0)
-
-
-if latest_inverter_time.tzinfo is None:
-    latest_inverter_time = latest_inverter_time.tz_localize("UTC")
-latest_local = latest_inverter_time.tz_convert(LOCAL_TIMEZONE)
-
-
-# --- lifetime / today energy stats (summed across all inverters) ------
-
-def lifetime_sum(column: str) -> float:
-    return number(column_or_zero(latest_inverters, column).sum())
-
-
-yield_lifetime = lifetime_sum("yield_lifetime_kwh")
-charge_lifetime = lifetime_sum("charge_lifetime_kwh")
-discharge_lifetime = lifetime_sum("discharge_lifetime_kwh")
-usage_lifetime = lifetime_sum("usage_lifetime_kwh")
-
-yield_today = lifetime_sum("yield_today_kwh")
-charge_today = lifetime_sum("charge_today_kwh")
-discharge_today = lifetime_sum("discharge_today_kwh")
-usage_today = lifetime_sum("usage_today_kwh")
-
-co2_avoided_kg = yield_lifetime * CO2_KG_PER_KWH
-
-
-# --- system temperatures (worst-case across all inverters) -------------
-
-temp_columns = [
-    ("Internal", "inverter_temp_c"),
-    ("Radiator 1", "radiator1_temp_c"),
-    ("Radiator 2", "radiator2_temp_c"),
-    ("Battery", "battery_temp_c"),
-]
-
-temps = []
-for label, column in temp_columns:
-    if has_column(latest_inverters, column):
-        value = number(column_or_zero(latest_inverters, column).max())
-    else:
-        value = 0.0
-    temps.append({"label": label, "value": value})
-
-
-# --- per-string solar array detail --------------------------------------
-
-strings = []
-max_string_power = max(
-    number(latest_inverters["pv1_power_w"].max() if "pv1_power_w" in latest_inverters else 0),
-    number(latest_inverters["pv2_power_w"].max() if "pv2_power_w" in latest_inverters else 0),
-    1.0,
-)
-for inverter_index, (_, row) in enumerate(latest_inverters.iterrows(), start=1):
-    suffix = f" · Inverter {inverter_index}" if len(latest_inverters) > 1 else ""
-    for string_num in (1, 2):
-        power_col = f"pv{string_num}_power_w"
-        voltage_col = f"pv{string_num}_voltage_v"
-        current_col = f"pv{string_num}_current_a"
-        if power_col not in row:
-            continue
-        power = number(row[power_col])
-        voltage = number(row.get(voltage_col, 0))
-        current = number(row.get(current_col, 0))
-        strings.append(
-            {
-                "label": f"Panel group {string_num}{suffix}",
-                "power": power,
-                "voltage": voltage,
-                "current": current,
-                "share": (power / max_string_power) * 100,
-            }
-        )
-
-
-# --- assemble flow-diagram nodes and edges -----------------------------
-
-solar_active = total_solar > 30
-battery_active = battery_flow > 10
-tesla_active = tesla_power > 20
-home_active = other_load > 5
-
-nodes = [
-    {
-        "id": "solar", "x": 18, "y": 18, "colour": COLOUR_SOLAR, "active": solar_active,
-        "icon": icon_solar(solar_active), "label": "Solar panels",
-        "value": watts(total_solar),
-        "sub": "Producing now" if solar_active else "No sun right now",
-    },
-    {
-        "id": "hub", "x": 50, "y": 50, "colour": COLOUR_SYSTEM, "active": True,
-        "icon": icon_inverter(), "label": f"EG4 inverter{'s' if len(latest_inverters) > 1 else ''}",
-        "value": watts(total_solar),
-        "sub": f"{len(latest_inverters)} unit{'s' if len(latest_inverters) > 1 else ''} online",
-    },
-    {
-        "id": "battery", "x": 82, "y": 18, "colour": battery_colour, "active": True,
-        "icon": icon_battery(battery_soc), "label": "Battery bank",
-        "value": f"{battery_soc:.0f}%",
-        "sub": battery_label,
-    },
-    {
-        "id": "home", "x": 30, "y": 86, "colour": COLOUR_HOME, "active": home_active,
-        "icon": icon_home(home_active), "label": "Home loads",
-        "value": watts(other_load),
-        "sub": "Powering your home" if home_active else "Minimal draw",
-    },
-    {
-        "id": "tesla", "x": 70, "y": 86, "colour": COLOUR_TESLA_ON if tesla_active else COLOUR_TESLA,
-        "active": tesla_active,
-        "icon": icon_tesla_connector(tesla_is_charging, vehicle_connected), "label": "Car charger",
-        "value": watts(tesla_power),
-        "sub": tesla_status,
-    },
-]
-
-edges = [
-    {
-        "id": "edge-solar", "d": "M18,18 L50,50",
-        "colour": COLOUR_SOLAR, "active": solar_active, "duration": 2.2,
-    },
-    {
-        "id": "edge-battery",
-        "d": "M82,18 L50,50" if battery_net > 10 else "M50,50 L82,18",
-        "colour": battery_colour, "active": battery_active, "duration": 2.0,
-    },
-    {
-        "id": "edge-home", "d": "M50,50 L30,86",
-        "colour": COLOUR_HOME, "active": home_active, "duration": 1.8,
-    },
-    {
-        "id": "edge-tesla", "d": "M50,50 L70,86",
-        "colour": COLOUR_TESLA_ON, "active": tesla_active, "duration": 1.6,
-    },
-]
-
-context = {
-    "nodes": nodes,
-    "edges": edges,
-    "strings": strings,
-    "temps": temps,
-    "updated_at": latest_local.strftime("%-I:%M:%S %p"),
-    "power_in": total_solar + battery_discharge,
-    "total_output": total_output,
-    "battery_flow": battery_flow,
-    "battery_label": battery_label,
-    "battery_soc": battery_soc,
-    "battery_voltage": battery_voltage,
-    "battery_colour": battery_colour,
-    "headroom": headroom,
-    "tesla_status": tesla_status,
-    "vehicle_connected": vehicle_connected,
-    "contactor_closed": contactor_closed,
-    "tesla_current": tesla_current,
-    "tesla_voltage": tesla_voltage,
-    "tesla_power": tesla_power,
-    "session_energy_wh": session_energy_wh,
-    "lifetime_energy_wh": lifetime_energy_wh,
-    "handle_temp": handle_temp,
-    "alert_count": len(alerts),
-    "recommended_a": recommended_a,
-    "other_load": other_load,
-    "yield_lifetime": yield_lifetime,
-    "charge_lifetime": charge_lifetime,
-    "discharge_lifetime": discharge_lifetime,
-    "usage_lifetime": usage_lifetime,
-    "yield_today": yield_today,
-    "charge_today": charge_today,
-    "discharge_today": discharge_today,
-    "usage_today": usage_today,
-    "co2_avoided_kg": co2_avoided_kg,
-}
-
-
-dashboard_html = dedent_html(build_dashboard_html(context))
-
-if hasattr(st, "iframe"):
-    # Streamlit >= 1.51 replacement for components.html. height="content"
-    # (the default) auto-measures the page so adding panels never clips.
-    st.iframe(dashboard_html, height="content")
-else:
-    components.html(dashboard_html, height=1500, scrolling=True)
-
-
-st.markdown("### Power over time")
-
-history = (
-    inverter_df
-    .groupby("recorded_at")
-    .agg(
-        solar=("pv_total_power_w", "sum"),
-        loads=("output_power_w", "sum"),
-        battery_charge=("battery_charge_power_w", "sum"),
-        battery_discharge=("battery_discharge_power_w", "sum"),
+    latest_inverters = (
+        inverter_df[inverter_df["recorded_at"] == latest_inverter_time]
+        .sort_values("inverter_serial")
+        .reset_index(drop=True)
     )
-)
 
-history_colours = [COLOUR_SOLAR, COLOUR_HOME, COLOUR_PURPLE, "#9d6bd6"]
-history_names = {
-    "solar": "Power from solar",
-    "loads": "Total power going out",
-    "battery_charge": "Power charging battery",
-    "battery_discharge": "Power coming from battery",
-}
-
-if not tesla_df.empty:
-    tesla_history = tesla_df.set_index("recorded_at")[["charging_power_w"]]
-    history = history.join(tesla_history, how="outer").sort_index().ffill()
-    history_names["charging_power_w"] = "Tesla charging power"
-    history_colours.append(COLOUR_TESLA)
-
-history = history.rename(columns=history_names)
-
-st.line_chart(
-    history,
-    height=290,
-    color=history_colours[: len(history.columns)],
-)
+    latest_tesla = tesla_df.iloc[-1] if not tesla_df.empty else None
 
 
-with st.expander("Raw but renamed details"):
-    display_columns = {
-        "inverter_serial": "Inverter",
-        "pv1_power_w": "Panel group 1 output",
-        "pv2_power_w": "Panel group 2 output",
-        "pv_total_power_w": "Total solar coming in",
-        "output_power_w": "Power going out",
-        "battery_charge_power_w": "Power going into battery",
-        "battery_discharge_power_w": "Power coming from battery",
-        "battery_soc_percent": "Battery level",
-        "battery_voltage_v": "Battery voltage",
+    total_solar = number(latest_inverters["pv_total_power_w"].sum())
+    total_output = number(latest_inverters["output_power_w"].sum())
+    battery_charge = number(latest_inverters["battery_charge_power_w"].sum())
+    battery_discharge = number(latest_inverters["battery_discharge_power_w"].sum())
+    battery_soc = number(latest_inverters["battery_soc_percent"].mean())
+    battery_voltage = number(latest_inverters["battery_voltage_v"].mean())
+
+
+    if latest_tesla is not None:
+        tesla_current = number(latest_tesla["charging_current_a"])
+        tesla_voltage = number(latest_tesla["grid_voltage_v"])
+        tesla_power = number(latest_tesla["charging_power_w"])
+        vehicle_connected = bool(latest_tesla["vehicle_connected"])
+        contactor_closed = bool(latest_tesla["contactor_closed"])
+        session_energy_wh = number(latest_tesla["session_energy_wh"])
+        lifetime_energy_wh = number(latest_tesla["lifetime_energy_wh"])
+        handle_temp = number(latest_tesla["handle_temp_c"])
+        try:
+            alerts = json.loads(latest_tesla["alerts_json"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            alerts = []
+    else:
+        tesla_current = tesla_voltage = tesla_power = 0.0
+        vehicle_connected = contactor_closed = False
+        session_energy_wh = lifetime_energy_wh = handle_temp = 0.0
+        alerts = []
+
+
+    tesla_is_charging = contactor_closed and tesla_current > 0.2
+
+    if tesla_is_charging:
+        tesla_status = "Charging"
+    elif vehicle_connected:
+        tesla_status = "Connected"
+    else:
+        tesla_status = "Idle"
+
+
+    other_load = max(total_output - tesla_power, 0.0)
+
+    battery_net = battery_discharge - battery_charge
+    if battery_net > 10:
+        battery_label = "Discharging"
+    elif battery_net < -10:
+        battery_label = "Charging"
+    else:
+        battery_label = "Idle"
+    battery_flow = abs(battery_net)
+    battery_colour = battery_tier_colour(battery_soc)
+
+
+    available_for_tesla = max(SYSTEM_CAPACITY_W - other_load - RESERVE_MARGIN_W, 0.0)
+    recommended_a = min(
+        TESLA_CONFIGURED_MAX_A,
+        math.floor(available_for_tesla / max(tesla_voltage or 240, 1)),
+    )
+
+    headroom = max(SYSTEM_CAPACITY_W - total_output, 0.0)
+
+
+    if latest_inverter_time.tzinfo is None:
+        latest_inverter_time = latest_inverter_time.tz_localize("UTC")
+    latest_local = latest_inverter_time.tz_convert(LOCAL_TIMEZONE)
+
+
+    # --- lifetime / today energy stats (summed across all inverters) ------
+
+    def lifetime_sum(column: str) -> float:
+        return number(column_or_zero(latest_inverters, column).sum())
+
+
+    yield_lifetime = lifetime_sum("yield_lifetime_kwh")
+    charge_lifetime = lifetime_sum("charge_lifetime_kwh")
+    discharge_lifetime = lifetime_sum("discharge_lifetime_kwh")
+    usage_lifetime = lifetime_sum("usage_lifetime_kwh")
+
+    yield_today = lifetime_sum("yield_today_kwh")
+    charge_today = lifetime_sum("charge_today_kwh")
+    discharge_today = lifetime_sum("discharge_today_kwh")
+    usage_today = lifetime_sum("usage_today_kwh")
+
+    co2_avoided_kg = yield_lifetime * CO2_KG_PER_KWH
+
+
+    # --- system temperatures (worst-case across all inverters) -------------
+
+    temp_columns = [
+        ("Internal", "inverter_temp_c"),
+        ("Radiator 1", "radiator1_temp_c"),
+        ("Radiator 2", "radiator2_temp_c"),
+        ("Battery", "battery_temp_c"),
+    ]
+
+    temps = []
+    for label, column in temp_columns:
+        if has_column(latest_inverters, column):
+            value = number(column_or_zero(latest_inverters, column).max())
+        else:
+            value = 0.0
+        temps.append({"label": label, "value": value})
+
+
+    # --- per-string solar array detail --------------------------------------
+
+    strings = []
+    max_string_power = max(
+        number(latest_inverters["pv1_power_w"].max() if "pv1_power_w" in latest_inverters else 0),
+        number(latest_inverters["pv2_power_w"].max() if "pv2_power_w" in latest_inverters else 0),
+        1.0,
+    )
+    for inverter_index, (_, row) in enumerate(latest_inverters.iterrows(), start=1):
+        suffix = f" · Inverter {inverter_index}" if len(latest_inverters) > 1 else ""
+        for string_num in (1, 2):
+            power_col = f"pv{string_num}_power_w"
+            voltage_col = f"pv{string_num}_voltage_v"
+            current_col = f"pv{string_num}_current_a"
+            if power_col not in row:
+                continue
+            power = number(row[power_col])
+            voltage = number(row.get(voltage_col, 0))
+            current = number(row.get(current_col, 0))
+            strings.append(
+                {
+                    "label": f"Panel group {string_num}{suffix}",
+                    "power": power,
+                    "voltage": voltage,
+                    "current": current,
+                    "share": (power / max_string_power) * 100,
+                }
+            )
+
+
+    # --- assemble flow-diagram nodes and edges -----------------------------
+
+    solar_active = total_solar > 30
+    battery_active = battery_flow > 10
+    tesla_active = tesla_power > 20
+    home_active = other_load > 5
+
+    nodes = [
+        {
+            "id": "solar", "x": 18, "y": 18, "colour": COLOUR_SOLAR, "active": solar_active,
+            "icon": icon_solar(solar_active), "label": "Solar panels",
+            "value": watts(total_solar),
+            "sub": "Producing now" if solar_active else "No sun right now",
+        },
+        {
+            "id": "hub", "x": 50, "y": 50, "colour": COLOUR_SYSTEM, "active": True,
+            "icon": icon_inverter(), "label": f"EG4 inverter{'s' if len(latest_inverters) > 1 else ''}",
+            "value": watts(total_solar),
+            "sub": f"{len(latest_inverters)} unit{'s' if len(latest_inverters) > 1 else ''} online",
+        },
+        {
+            "id": "battery", "x": 82, "y": 18, "colour": battery_colour, "active": True,
+            "icon": icon_battery(battery_soc), "label": "Battery bank",
+            "value": f"{battery_soc:.0f}%",
+            "sub": battery_label,
+        },
+        {
+            "id": "home", "x": 30, "y": 86, "colour": COLOUR_HOME, "active": home_active,
+            "icon": icon_home(home_active), "label": "Home loads",
+            "value": watts(other_load),
+            "sub": "Powering your home" if home_active else "Minimal draw",
+        },
+        {
+            "id": "tesla", "x": 70, "y": 86, "colour": COLOUR_TESLA_ON if tesla_active else COLOUR_TESLA,
+            "active": tesla_active,
+            "icon": icon_tesla_connector(tesla_is_charging, vehicle_connected), "label": "Car charger",
+            "value": watts(tesla_power),
+            "sub": tesla_status,
+        },
+    ]
+
+    edges = [
+        {
+            "id": "edge-solar", "d": "M18,18 L50,50",
+            "colour": COLOUR_SOLAR, "active": solar_active, "duration": 2.2,
+        },
+        {
+            "id": "edge-battery",
+            "d": "M82,18 L50,50" if battery_net > 10 else "M50,50 L82,18",
+            "colour": battery_colour, "active": battery_active, "duration": 2.0,
+        },
+        {
+            "id": "edge-home", "d": "M50,50 L30,86",
+            "colour": COLOUR_HOME, "active": home_active, "duration": 1.8,
+        },
+        {
+            "id": "edge-tesla", "d": "M50,50 L70,86",
+            "colour": COLOUR_TESLA_ON, "active": tesla_active, "duration": 1.6,
+        },
+    ]
+
+    context = {
+        "nodes": nodes,
+        "edges": edges,
+        "strings": strings,
+        "temps": temps,
+        "updated_at": latest_local.strftime("%-I:%M:%S %p"),
+        "power_in": total_solar + battery_discharge,
+        "total_output": total_output,
+        "battery_flow": battery_flow,
+        "battery_label": battery_label,
+        "battery_soc": battery_soc,
+        "battery_voltage": battery_voltage,
+        "battery_colour": battery_colour,
+        "headroom": headroom,
+        "tesla_status": tesla_status,
+        "vehicle_connected": vehicle_connected,
+        "contactor_closed": contactor_closed,
+        "tesla_current": tesla_current,
+        "tesla_voltage": tesla_voltage,
+        "tesla_power": tesla_power,
+        "session_energy_wh": session_energy_wh,
+        "lifetime_energy_wh": lifetime_energy_wh,
+        "handle_temp": handle_temp,
+        "alert_count": len(alerts),
+        "recommended_a": recommended_a,
+        "other_load": other_load,
+        "yield_lifetime": yield_lifetime,
+        "charge_lifetime": charge_lifetime,
+        "discharge_lifetime": discharge_lifetime,
+        "usage_lifetime": usage_lifetime,
+        "yield_today": yield_today,
+        "charge_today": charge_today,
+        "discharge_today": discharge_today,
+        "usage_today": usage_today,
+        "co2_avoided_kg": co2_avoided_kg,
     }
-    available_columns = [c for c in display_columns if c in latest_inverters.columns]
-    display_data = latest_inverters[available_columns].rename(columns=display_columns)
-
-    st.dataframe(display_data, hide_index=True, width="stretch")
 
 
-st.caption(
-    "Tesla values come directly from the Wall Connector's local vitals "
-    "endpoint. EG4 values come from the EG4 monitoring cloud and may "
-    "update less frequently. Temperature colour bands and the CO2 estimate "
-    "are informal, adjustable defaults, not manufacturer specs."
-)
+    dashboard_html = dedent_html(build_dashboard_html(context))
+
+    if hasattr(st, "iframe"):
+        # Streamlit >= 1.51 replacement for components.html. height="content"
+        # (the default) auto-measures the page so adding panels never clips.
+        st.iframe(dashboard_html, height="content")
+    else:
+        components.html(dashboard_html, height=1500, scrolling=True)
+
+
+    st.markdown("### Power over time")
+
+    history = (
+        inverter_df
+        .groupby("recorded_at")
+        .agg(
+            solar=("pv_total_power_w", "sum"),
+            loads=("output_power_w", "sum"),
+            battery_charge=("battery_charge_power_w", "sum"),
+            battery_discharge=("battery_discharge_power_w", "sum"),
+        )
+    )
+
+    history_colours = [COLOUR_SOLAR, COLOUR_HOME, COLOUR_PURPLE, "#9d6bd6"]
+    history_names = {
+        "solar": "Power from solar",
+        "loads": "Total power going out",
+        "battery_charge": "Power charging battery",
+        "battery_discharge": "Power coming from battery",
+    }
+
+    if not tesla_df.empty:
+        tesla_history = tesla_df.set_index("recorded_at")[["charging_power_w"]]
+        history = history.join(tesla_history, how="outer").sort_index().ffill()
+        history_names["charging_power_w"] = "Tesla charging power"
+        history_colours.append(COLOUR_TESLA)
+
+    history = history.rename(columns=history_names)
+
+    st.line_chart(
+        history,
+        height=290,
+        color=history_colours[: len(history.columns)],
+    )
+
+
+    with st.expander("Raw but renamed details"):
+        display_columns = {
+            "inverter_serial": "Inverter",
+            "pv1_power_w": "Panel group 1 output",
+            "pv2_power_w": "Panel group 2 output",
+            "pv_total_power_w": "Total solar coming in",
+            "output_power_w": "Power going out",
+            "battery_charge_power_w": "Power going into battery",
+            "battery_discharge_power_w": "Power coming from battery",
+            "battery_soc_percent": "Battery level",
+            "battery_voltage_v": "Battery voltage",
+        }
+        available_columns = [c for c in display_columns if c in latest_inverters.columns]
+        display_data = latest_inverters[available_columns].rename(columns=display_columns)
+
+        st.dataframe(display_data, hide_index=True, width="stretch")
+
+
+    st.caption(
+        "Tesla values come directly from the Wall Connector's local vitals "
+        "endpoint. EG4 values come from the EG4 monitoring cloud and may "
+        "update less frequently. Temperature colour bands and the CO2 estimate "
+        "are informal, adjustable defaults, not manufacturer specs."
+    )
+
+render_live_dashboard()
