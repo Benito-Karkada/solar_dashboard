@@ -24,11 +24,11 @@ def _to_arg(value):
     if value is None:
         return {"type": "null", "value": None}
     if isinstance(value, bool):
-        return {"type": "integer", "value": str(int(value))}
+        return {"type": "integer", "value": int(value)}
     if isinstance(value, int):
-        return {"type": "integer", "value": str(value)}
+        return {"type": "integer", "value": value}
     if isinstance(value, float):
-        return {"type": "float", "value": repr(value)}
+        return {"type": "float", "value": value}
     return {"type": "text", "value": str(value)}
 
 
